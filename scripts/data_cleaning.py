@@ -1,95 +1,100 @@
 import pandas as pd
 from pathlib import Path
 
+# =========================
 # PROJECT PATH SETUP
-
+# =========================
 project_root = Path(__file__).resolve().parent.parent
+
 raw_path = project_root / "data" / "raw"
 processed_path = project_root / "data" / "processed"
 
 processed_path.mkdir(parents=True, exist_ok=True)
 
-# HELPER FUNCTION
-
-def normalize_columns(df):
-    df.columns = df.columns.str.lower().str.strip()
-    return df
-
-
-def detect_date_column(df):
-    for col in df.columns:
-        if "date" in col:
-            return col
-    return None
-
-# 1. NAV HISTORY CLEANING
-
+# =========================
+# 1. CLEAN NAV HISTORY
+# =========================
 nav = pd.read_csv(raw_path / "02_nav_history.csv")
-nav = normalize_columns(nav)
 
 nav["date"] = pd.to_datetime(nav["date"], errors="coerce")
 nav["nav"] = pd.to_numeric(nav["nav"], errors="coerce")
 
+# Remove invalid NAV
 nav = nav[nav["nav"] > 0]
+
+# Remove duplicates
 nav = nav.drop_duplicates(subset=["amfi_code", "date"])
+
+# Sort
 nav = nav.sort_values(["amfi_code", "date"])
 
+# Forward fill NAV per fund
 nav["nav"] = nav.groupby("amfi_code")["nav"].ffill()
 
+# Save
 nav.to_csv(processed_path / "nav_history_cleaned.csv", index=False)
 
-# 2. INVESTOR TRANSACTIONS CLEANING
 
+# =========================
+# 2. CLEAN INVESTOR TRANSACTIONS
+# =========================
 txn = pd.read_csv(raw_path / "08_investor_transactions.csv")
-txn = normalize_columns(txn)
 
-# Detect correct date column
-txn_date_col = detect_date_column(txn)
-txn[txn_date_col] = pd.to_datetime(txn[txn_date_col], errors="coerce")
-
-# Standardize transaction type
+# Standardize transaction types
 txn["transaction_type"] = txn["transaction_type"].str.upper().str.strip()
 
 txn["transaction_type"] = txn["transaction_type"].replace({
+    "SIP": "SIP",
     "SYSTEMATIC": "SIP",
     "LUMPSUM": "LUMPSUM",
     "REDEMPTION": "REDEMPTION",
     "REDEEM": "REDEMPTION"
 })
 
-# Amount validation
-txn["amount_inr"] = pd.to_numeric(txn["amount_inr"], errors="coerce")
-txn = txn[txn["amount_inr"] > 0]
+# Fix date
+txn["date"] = pd.to_datetime(txn["date"], errors="coerce")
 
-# KYC validation
+# Validate amount
+txn["amount"] = pd.to_numeric(txn["amount"], errors="coerce")
+txn = txn[txn["amount"] > 0]
+
+# KYC validation (keep only valid values)
+valid_kyc = ["VERIFIED", "PENDING", "REJECTED"]
 txn["kyc_status"] = txn["kyc_status"].str.upper().str.strip()
-txn = txn[txn["kyc_status"].isin(["VERIFIED", "PENDING", "REJECTED"])]
+txn = txn[txn["kyc_status"].isin(valid_kyc)]
+
+# Save
 txn.to_csv(processed_path / "investor_transactions_cleaned.csv", index=False)
 
-# 3. SCHEME PERFORMANCE CLEANING
 
+# =========================
+# 3. CLEAN SCHEME PERFORMANCE
+# =========================
 perf = pd.read_csv(raw_path / "07_scheme_performance.csv")
-perf = normalize_columns(perf)
 
-# Convert all numeric columns except identifiers
-numeric_cols = [col for col in perf.columns if col not in ["amfi_code", "scheme_name", "fund_house", "category", "plan", "risk_grade"]]
-
+# Convert numeric columns
+numeric_cols = perf.columns.drop(["amfi_code"])
 for col in numeric_cols:
     perf[col] = pd.to_numeric(perf[col], errors="coerce")
 
+# Remove rows with missing critical values
 perf = perf.dropna(subset=numeric_cols)
 
-# Expense ratio filter (0.1% to 2.5%)
-if "expense_ratio_pct" in perf.columns:
-    perf = perf[(perf["expense_ratio_pct"] >= 0.1) & (perf["expense_ratio_pct"] <= 2.5)]
+# Expense ratio validation (0.1% to 2.5%)
+if "expense_ratio" in perf.columns:
+    perf = perf[(perf["expense_ratio"] >= 0.1) & (perf["expense_ratio"] <= 2.5)]
 
-# Remove extreme anomalies in returns
-for col in perf.columns:
-    if "return" in col:
+# Flag anomalies (basic rule: extreme returns)
+for col in numeric_cols:
+    if "return" in col.lower():
         perf = perf[(perf[col] > -100) & (perf[col] < 500)]
 
+# Save
 perf.to_csv(processed_path / "scheme_performance_cleaned.csv", index=False)
 
 
-print("\n CLEANING COMPLETE")
-print("Processed files saved in:", processed_path)
+# =========================
+# DONE MESSAGE
+# =========================
+print("\nCLEANING COMPLETE")
+print("Files saved in:", processed_path)
